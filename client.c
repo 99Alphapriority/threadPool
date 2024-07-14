@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include "threadpool.h"
 
-#define TOTAL_WORK 100
+#define TOTAL_WORK 99999
 
 void add(void *param)
 {
@@ -35,7 +35,7 @@ int main(void)
 		pool_submit(&add,&work[i]);
 
     // may be helpful 
-    //sleep(3);
+    sleep(10);
 
     pool_shutdown();
 

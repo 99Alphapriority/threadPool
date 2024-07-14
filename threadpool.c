@@ -10,9 +10,7 @@
 #include "threadpool.h"
 #include <unistd.h>
 
-#define QUEUE_SIZE 10
-#define NUMBER_OF_THREADS 3
-#define WORKER_COUNT 5
+#define WORKER_COUNT 4
 
 #define TRUE 1
 
@@ -36,6 +34,10 @@ task_q_st *task_q_tail = NULL;
 
 pthread_t workers[5];
 pthread_mutex_t mutexQ;
+pthread_cond_t condQ;
+
+int taskCount = 0;
+int totalWorkCount = 0;
 
 // the work queue
 task worktodo;
@@ -57,10 +59,11 @@ int enqueue(task t)
 		return 1;
 
 	task_q_tail = task_q_tail->next;
+	taskCount++;
 
 	/*release the lock*/
 	pthread_mutex_unlock(&mutexQ);
-
+	pthread_cond_signal(&condQ);
 	return 0;
 }
 
@@ -68,22 +71,18 @@ int enqueue(task t)
 task dequeue() 
 {
 	task worktodo;
-	/*acquire the lock*/
-	pthread_mutex_lock(&mutexQ);
 
 	if(NULL == task_q_head)
 	{
 		memset(&worktodo, 0, sizeof(worktodo));
-		pthread_mutex_unlock(&mutexQ);
 		return worktodo;
 	}
 
 	task_q_st *temp = task_q_head;
 	worktodo = temp->task_todo;
 	task_q_head = task_q_head->next;
-
-	/*release the lock*/
-	pthread_mutex_unlock(&mutexQ);
+	taskCount--;
+	totalWorkCount++;
 
 	free(temp);
 
@@ -91,19 +90,36 @@ task dequeue()
 }
 
 // the worker thread in the thread pool
-void *worker()
+void *worker(void* args)
 {
-	sleep(10);
-	while(1)
+	
+	while(TRUE)
 	{
+
+		/*acquire lock*/
+		pthread_mutex_lock(&mutexQ);
+
+		while(0 == taskCount)
+		{
+			pthread_cond_wait(&condQ, &mutexQ);
+			/*check if the thread is no longer needed and there is a cancellation request*/
+			pthread_testcancel();
+		}
 		task worktodo = dequeue();
+
+		/*release the lock*/
+		pthread_mutex_unlock(&mutexQ);
 		
-		if(NULL == worktodo.function)
-			continue;
 		// execute the task
 		execute(worktodo.function, worktodo.data);
+
+		/*value should match TOTAL_WORK value in client.c*/
+		if(99999 == totalWorkCount)
+			break;
 	}
-    pthread_exit(0);
+
+	while(1)
+		pthread_testcancel();
 }
 
 /**
@@ -133,17 +149,18 @@ void pool_init(void)
 {
 	/*create and initialize the lock*/
 	if(0 != pthread_mutex_init(&mutexQ, NULL))
-	{
-		printf("Mutex init has failed\n");
-		return;
-	}
+		perror("Mutex init has failed");
+
+	if(0 != pthread_cond_init(&condQ, NULL))
+		perror("Condition variable creation has failed");
 
 	task_q_head = (task_q_st*) malloc (sizeof(task_q_st));
 	task_q_tail = task_q_head;
 
 	for(int i = 0; i < WORKER_COUNT; i++)
 	{
-		pthread_create(&workers[i],NULL,worker,NULL);
+		if(0 != pthread_create(&workers[i],NULL,worker,NULL))
+			perror("Failed to create threads");
 	}
 }
 
@@ -151,7 +168,18 @@ void pool_init(void)
 void pool_shutdown(void)
 {
 	for(int i = 0; i < WORKER_COUNT; i++)
-    {
-		pthread_join(workers[i],NULL);
+	{
+		/*cancel each thread*/
+		pthread_cancel(workers[i]);
 	}
+
+	for(int i = 0; i < WORKER_COUNT; i++)
+    {
+		if(0 != pthread_join(workers[i],NULL))
+			perror("Failed to join the thread");
+	}
+	
+	pthread_mutex_destroy(&mutexQ);
+	pthread_cond_destroy(&condQ);
+	return;
 }
